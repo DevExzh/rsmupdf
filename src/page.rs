@@ -117,6 +117,29 @@ impl Page {
         Ok(TextPage { inner })
     }
 
+    pub fn to_text_page_with_rect(
+        &self,
+        rect: Rect,
+        flags: TextPageFlags,
+    ) -> Result<TextPage, Error> {
+        let opts = fz_stext_options {
+            flags: flags.bits() as i32,
+            scale: 0.0,
+            clip: fz_rect::from(rect),
+        };
+        let inner = unsafe {
+            ffi_try!(mupdf_new_stext_page_from_page(
+                context(),
+                self.as_ptr().cast_mut(),
+                &opts
+            ))?
+        };
+
+        let inner = unsafe { NonNull::new_unchecked(inner) };
+
+        Ok(TextPage { inner })
+    }
+
     pub fn to_display_list(&self, annotations: bool) -> Result<DisplayList, Error> {
         unsafe {
             ffi_try!(mupdf_page_to_display_list(
@@ -423,6 +446,20 @@ mod test {
         let doc = test_document!("..", "files/dummy.pdf").unwrap();
         let page0 = doc.load_page(0).unwrap();
         let _tp = page0.to_text_page(TextPageFlags::PRESERVE_IMAGES).unwrap();
+    }
+
+    #[test]
+    fn test_page_to_text_page_with_rect() {
+        use crate::TextPageFlags;
+
+        let doc = test_document!("..", "files/dummy.pdf").unwrap();
+        let page0 = doc.load_page(0).unwrap();
+        let _tp = page0
+            .to_text_page_with_rect(
+                Rect::new(0.0, 0.0, 0.0, 0.0),
+                TextPageFlags::PRESERVE_IMAGES,
+            )
+            .unwrap();
     }
 
     #[test]
