@@ -11,8 +11,8 @@ use bitflags::bitflags;
 use mupdf_sys::*;
 
 use crate::{
-    context, from_enum, rust_slice_to_ffi_ptr, unsafe_impl_ffi_wrapper, Buffer, Error,
-    FFIWrapper, Font, Image, Matrix, Point, Quad, Rect, WriteMode,
+    context, from_enum, rust_slice_to_ffi_ptr, unsafe_impl_ffi_wrapper, Buffer, Error, FFIWrapper,
+    Font, Image, Matrix, Point, Quad, Rect, WriteMode,
 };
 use crate::{output::Output, FFIAnalogue};
 
@@ -537,7 +537,10 @@ impl TextLine<'_> {
 
         for ch in self.chars() {
             let font = ch.font();
-            let font_name = font.as_ref().map(|f| f.name().to_string()).unwrap_or_default();
+            let font_name = font
+                .as_ref()
+                .map(|f| f.name().to_string())
+                .unwrap_or_default();
             let font_size = ch.size();
             let font_flags = ch.font_flags();
             let char_flags = ch.char_flags();
@@ -826,7 +829,7 @@ mod test {
         let page0 = doc.load_page(0).unwrap();
         let text_page = page0.to_text_page(TextPageFlags::empty()).unwrap();
         let words = text_page.extract_words(None);
-        
+
         assert!(!words.is_empty());
         assert!(words.iter().any(|w| w.text == "Dummy"));
         assert!(words.iter().any(|w| w.text == "PDF"));
@@ -838,7 +841,7 @@ mod test {
         let doc = test_document!("..", "files/dummy.pdf").unwrap();
         let page0 = doc.load_page(0).unwrap();
         let text_page = page0.to_text_page(TextPageFlags::empty()).unwrap();
-        
+
         for block in text_page.blocks() {
             for line in block.lines() {
                 let spans = line.extract_spans();
@@ -856,7 +859,7 @@ mod test {
         let doc = test_document!("..", "files/dummy.pdf").unwrap();
         let page0 = doc.load_page(0).unwrap();
         let text_page = page0.to_text_page(TextPageFlags::empty()).unwrap();
-        
+
         for block in text_page.blocks() {
             for line in block.lines() {
                 for ch in line.chars() {
