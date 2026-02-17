@@ -11,8 +11,8 @@ use bitflags::bitflags;
 use mupdf_sys::*;
 
 use crate::{
-    context, from_enum, rust_slice_to_ffi_ptr, unsafe_impl_ffi_wrapper, Buffer, Error, FFIWrapper,
-    Image, Matrix, Point, Quad, Rect, WriteMode,
+    context, from_enum, rust_slice_to_ffi_ptr, unsafe_impl_ffi_wrapper, Buffer, Error,
+    FFIWrapper, Font, Image, Matrix, Point, Quad, Rect, WriteMode,
 };
 use crate::{output::Output, FFIAnalogue};
 
@@ -38,6 +38,69 @@ bitflags! {
         const USE_GID_FOR_UNKNOWN_UNICODE = FZ_STEXT_USE_GID_FOR_UNKNOWN_UNICODE as _;
         const ACCURATE_ASCENDERS = FZ_STEXT_ACCURATE_ASCENDERS as _;
         const ACCURATE_SIDE_BEARINGS = FZ_STEXT_ACCURATE_SIDE_BEARINGS as _;
+    }
+}
+
+bitflags! {
+    /// Font style flags derived from font properties.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct FontFlags: u32 {
+        const SUPERSCRIPT = 1;
+        const ITALIC = 2;
+        const SERIFED = 4;
+        const MONOSPACED = 8;
+        const BOLD = 16;
+    }
+}
+
+bitflags! {
+    /// Character-level flags from fz_stext_char.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct CharFlags: u16 {
+        const STRIKEOUT = 1;
+        const UNDERLINE = 2;
+        const SYNTHETIC = 4;
+    }
+}
+
+/// Represents a text span - a sequence of characters with uniform styling
+#[derive(Debug, Clone)]
+pub struct TextSpan {
+    pub text: String,
+    pub font_name: String,
+    pub font_size: f32,
+    pub font_flags: FontFlags,
+    pub char_flags: CharFlags,
+    pub color: u32,
+    pub alpha: u8,
+    pub origin: Point,
+    pub bbox: Rect,
+    pub ascender: f32,
+    pub descender: f32,
+    pub bidi_level: u16,
+}
+
+/// Represents a word in the text with its bounding box and metadata
+#[derive(Debug, Clone)]
+pub struct TextWord {
+    pub text: String,
+    pub bbox: Rect,
+    pub block_num: usize,
+    pub line_num: usize,
+    pub word_num: usize,
+}
+
+/// Check if a character is a word delimiter
+fn is_word_delimiter(c: char, custom_delimiters: Option<&str>) -> bool {
+    if let Some(delimiters) = custom_delimiters {
+        delimiters.contains(c)
+    } else {
+        // Default word delimiters: whitespace and common punctuation
+        c.is_whitespace()
+            || matches!(
+                c,
+                ',' | '.' | ';' | ':' | '!' | '?' | '-' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
     }
 }
 
@@ -301,6 +364,62 @@ impl TextPage {
             ))
         }
     }
+
+    /// Extract words from the text page with optional custom delimiters
+    pub fn extract_words(&self, delimiters: Option<&str>) -> Vec<TextWord> {
+        let mut words = Vec::new();
+
+        for (block_num, block) in self.blocks().enumerate() {
+            if block.r#type() != TextBlockType::Text {
+                continue;
+            }
+
+            for (line_num, line) in block.lines().enumerate() {
+                let mut word_num = 0usize;
+                let mut current_word = String::new();
+                let mut word_bbox = Rect::new(0.0, 0.0, 0.0, 0.0);
+
+                for ch in line.chars() {
+                    if let Some(c) = ch.char() {
+                        if is_word_delimiter(c, delimiters) {
+                            if !current_word.is_empty() && !word_bbox.is_empty() {
+                                words.push(TextWord {
+                                    text: current_word.clone(),
+                                    bbox: word_bbox,
+                                    block_num,
+                                    line_num,
+                                    word_num,
+                                });
+                                word_num += 1;
+                                current_word.clear();
+                                word_bbox = Rect::new(0.0, 0.0, 0.0, 0.0);
+                            }
+                        } else {
+                            current_word.push(c);
+                            let char_rect = Rect::from(ch.quad());
+                            word_bbox = if word_bbox.is_empty() {
+                                char_rect
+                            } else {
+                                word_bbox.union(&char_rect)
+                            };
+                        }
+                    }
+                }
+
+                if !current_word.is_empty() && !word_bbox.is_empty() {
+                    words.push(TextWord {
+                        text: current_word,
+                        bbox: word_bbox,
+                        block_num,
+                        line_num,
+                        word_num,
+                    });
+                }
+            }
+        }
+
+        words
+    }
 }
 
 #[repr(i32)]
@@ -410,6 +529,79 @@ impl TextLine<'_> {
             _marker: PhantomData,
         }
     }
+
+    /// Extract text spans from this line - groups of characters with uniform styling
+    pub fn extract_spans(&self) -> Vec<TextSpan> {
+        let mut spans = Vec::new();
+        let mut current_span: Option<TextSpan> = None;
+
+        for ch in self.chars() {
+            let font = ch.font();
+            let font_name = font.as_ref().map(|f| f.name().to_string()).unwrap_or_default();
+            let font_size = ch.size();
+            let font_flags = ch.font_flags();
+            let char_flags = ch.char_flags();
+            let color = ch.color();
+            let alpha = ch.alpha();
+            let origin = ch.origin();
+            let bidi_level = ch.bidi_level();
+
+            let ascender = font.as_ref().map(|f| f.ascender()).unwrap_or(0.9);
+            let descender = font.as_ref().map(|f| f.descender()).unwrap_or(-0.1);
+
+            // Check if we need to start a new span
+            let need_new_span = if let Some(ref span) = current_span {
+                span.font_name != font_name
+                    || (span.font_size - font_size).abs() > 0.001
+                    || span.font_flags != font_flags
+                    || span.char_flags != char_flags
+                    || span.color != color
+                    || span.bidi_level != bidi_level
+            } else {
+                true
+            };
+
+            if need_new_span {
+                // Save the previous span if it exists
+                if let Some(span) = current_span.take() {
+                    spans.push(span);
+                }
+
+                // Start a new span
+                current_span = Some(TextSpan {
+                    text: String::new(),
+                    font_name,
+                    font_size,
+                    font_flags,
+                    char_flags,
+                    color,
+                    alpha,
+                    origin,
+                    bbox: Rect::from(ch.quad()),
+                    ascender,
+                    descender,
+                    bidi_level,
+                });
+            }
+
+            // Add character to current span
+            if let Some(ref mut span) = current_span {
+                if let Some(c) = ch.char() {
+                    span.text.push(c);
+                }
+                // Update bbox to include this character
+                let char_rect = Rect::from(ch.quad());
+                span.bbox = span.bbox.union(&char_rect);
+            }
+        }
+
+        // Don't forget the last span
+        if let Some(span) = current_span {
+            spans.push(span);
+        }
+
+        spans
+    }
 }
 
 #[derive(Debug)]
@@ -453,6 +645,55 @@ impl TextChar<'_> {
 
     pub fn quad(&self) -> Quad {
         self.inner.quad.into()
+    }
+
+    pub fn font(&self) -> Option<Font> {
+        if self.inner.font.is_null() {
+            return None;
+        }
+        unsafe {
+            fz_keep_font(context(), self.inner.font);
+            Some(Font::from_raw(self.inner.font))
+        }
+    }
+
+    pub fn color(&self) -> u32 {
+        self.inner.argb & 0xFFFFFF
+    }
+
+    pub fn alpha(&self) -> u8 {
+        ((self.inner.argb >> 24) & 0xFF) as u8
+    }
+
+    pub fn argb(&self) -> u32 {
+        self.inner.argb
+    }
+
+    pub fn bidi_level(&self) -> u16 {
+        self.inner.bidi
+    }
+
+    pub fn char_flags(&self) -> CharFlags {
+        CharFlags::from_bits_truncate(self.inner.flags)
+    }
+
+    pub fn font_flags(&self) -> FontFlags {
+        let mut flags = FontFlags::empty();
+        if let Some(font) = self.font() {
+            if font.is_bold() {
+                flags |= FontFlags::BOLD;
+            }
+            if font.is_italic() {
+                flags |= FontFlags::ITALIC;
+            }
+            if font.is_serif() {
+                flags |= FontFlags::SERIFED;
+            }
+            if font.is_monospaced() {
+                flags |= FontFlags::MONOSPACED;
+            }
+        }
+        flags
     }
 }
 
@@ -577,5 +818,58 @@ mod test {
 
         let hits = text_page.search("Not Found").unwrap();
         assert_eq!(hits.len(), 0);
+    }
+
+    #[test]
+    fn test_extract_words() {
+        let doc = test_document!("..", "files/dummy.pdf").unwrap();
+        let page0 = doc.load_page(0).unwrap();
+        let text_page = page0.to_text_page(TextPageFlags::empty()).unwrap();
+        let words = text_page.extract_words(None);
+        
+        assert!(!words.is_empty());
+        assert!(words.iter().any(|w| w.text == "Dummy"));
+        assert!(words.iter().any(|w| w.text == "PDF"));
+        assert!(words.iter().any(|w| w.text == "file"));
+    }
+
+    #[test]
+    fn test_extract_spans() {
+        let doc = test_document!("..", "files/dummy.pdf").unwrap();
+        let page0 = doc.load_page(0).unwrap();
+        let text_page = page0.to_text_page(TextPageFlags::empty()).unwrap();
+        
+        for block in text_page.blocks() {
+            for line in block.lines() {
+                let spans = line.extract_spans();
+                assert!(!spans.is_empty());
+                for span in &spans {
+                    assert!(!span.text.is_empty());
+                    assert!(span.font_size > 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_char_font_properties() {
+        let doc = test_document!("..", "files/dummy.pdf").unwrap();
+        let page0 = doc.load_page(0).unwrap();
+        let text_page = page0.to_text_page(TextPageFlags::empty()).unwrap();
+        
+        for block in text_page.blocks() {
+            for line in block.lines() {
+                for ch in line.chars() {
+                    if let Some(font) = ch.font() {
+                        assert!(!font.name().is_empty());
+                    }
+                    assert!(ch.size() > 0.0);
+                    let _font_flags = ch.font_flags();
+                    let _char_flags = ch.char_flags();
+                    let _color = ch.color();
+                    let _alpha = ch.alpha();
+                }
+            }
+        }
     }
 }
