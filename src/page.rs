@@ -402,7 +402,7 @@ pub struct StextPage {
 
 #[cfg(test)]
 mod test {
-    use crate::{document::test_document, Document, Matrix};
+    use crate::{document::test_document, Document, Matrix, Rect};
 
     #[test]
     #[cfg(feature = "serde")]

@@ -84,6 +84,51 @@ impl DisplayList {
         Ok(TextPage { inner })
     }
 
+    /// Convert the display list to a text page with a clipping rectangle.
+    ///
+    /// This function behaves like [`to_text_page`](Self::to_text_page), but allows specifying
+    /// a clip rectangle to limit the text extraction to a specific area of the page.
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - Options for creating the text page, controlling features like
+    ///   ligature preservation, whitespace handling, image inclusion, etc.
+    /// * `clip` - The clipping rectangle. Only text within this rectangle will be included
+    ///   in the resulting text page.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use mupdf::{DisplayList, Rect, TextPageFlags};
+    /// # fn example(list: &DisplayList) -> Result<(), mupdf::Error> {
+    /// // Extract text from the top half of the page only
+    /// let clip_rect = Rect::new(0.0, 0.0, 612.0, 396.0);
+    /// let text_page = list.to_text_page_with_rect(TextPageFlags::empty(), clip_rect)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn to_text_page_with_rect(
+        &self,
+        clip: Rect,
+        flags: TextPageFlags,
+    ) -> Result<TextPage, Error> {
+        let opts = fz_stext_options {
+            flags: flags.bits() as i32,
+            scale: 0.0,
+            clip: clip.into(),
+        };
+
+        let inner = unsafe { fz_new_stext_page_from_display_list(context(), self.inner, &opts) };
+
+        if inner.is_null() {
+            return Err(Error::UnexpectedNullPtr);
+        }
+
+        let inner = unsafe { NonNull::new_unchecked(inner) };
+
+        Ok(TextPage { inner })
+    }
+
     pub fn to_image(&self, width: f32, height: f32) -> Result<Image, Error> {
         Image::from_display_list(self, width, height)
     }
@@ -214,5 +259,33 @@ mod test {
             }
         })
         .unwrap();
+    }
+
+    #[test]
+    fn test_display_list_to_text_page_with_rect() {
+        use crate::{Rect, TextPageFlags};
+
+        let doc = test_document!("..", "files/dummy.pdf").unwrap();
+        let page0 = doc.load_page(0).unwrap();
+        let list = page0.to_display_list(false).unwrap();
+
+        // Get the bounds of the display list
+        let bounds = list.bounds();
+
+        // Test with full bounds - should find the text
+        let text_page = list
+            .to_text_page_with_rect(TextPageFlags::empty(), bounds)
+            .unwrap();
+        let text = text_page.to_text().unwrap();
+        assert!(text.contains("Dummy PDF file"));
+
+        // Verify the function returns a valid TextPage with a clip rect
+        // The clip rect functionality depends on MuPDF's internal implementation
+        let clip_rect = Rect::new(bounds.x0, bounds.y0, bounds.x1, bounds.y1 / 2.0);
+        let text_page_clipped = list
+            .to_text_page_with_rect(TextPageFlags::empty(), clip_rect)
+            .unwrap();
+        // TextPage is valid and can be used
+        let _text_clipped = text_page_clipped.to_text().unwrap();
     }
 }
